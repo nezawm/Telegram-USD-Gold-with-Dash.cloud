@@ -1,0 +1,11 @@
+# Never commit secrets if you ever add a local .env or wrangler.toml with vars
+.env
+*.env
+.dev.vars
+wrangler.toml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

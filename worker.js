@@ -7,7 +7,8 @@
 // Required secrets (Settings -> Variables and Secrets):
 //   TELEGRAM_BOT_TOKEN  - from @BotFather
 //   NAVASAN_API_KEY     - from navasan.tech
-//   ADMIN_CHAT_ID       - your own numeric Telegram chat ID (the only person who sees custom-bot requests)
+//   ADMIN_CHAT_ID       - your own numeric Telegram chat ID (the only person who sees custom-bot requests;
+//                         the scheduled price is sent to ALL users who pressed /start, not just the admin)
 //
 // Required binding (Settings -> Bindings -> KV Namespace):
 //   BOT_STATE           - any KV namespace, used to remember "this user is typing a description"
@@ -97,9 +98,81 @@ const editMessage = (env, chatId, messageId, text, replyMarkup) =>
 const answerCallback = (env, callbackQueryId, text) =>
   tg(env, 'answerCallbackQuery', { callback_query_id: callbackQueryId, ...(text ? { text } : {}) });
 
+// ---------------------------------------------------------------------------
+// Subscribers + broadcast
+// ---------------------------------------------------------------------------
+// Every user who presses /start (or any menu button) is stored in KV as `sub:<chatId>`.
+// The scheduled push is sent to ALL of them, in small batches, because Cloudflare's free
+// plan allows only ~50 outgoing requests per invocation.
+const BATCH_SIZE = 35;            // sends per invocation (keeps us under the 50-subrequest limit)
+const SENDS_PER_SECOND = 20;      // Telegram allows ~30 msg/sec globally; stay below it
+const CONTINUE_CRON = '* * * * *'; // optional 2nd cron: continues a broadcast that didn't fit in one batch
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function addSubscriber(env, chatId) {
+  await env.BOT_STATE.delete(`optout:${chatId}`);
+  if (!(await env.BOT_STATE.get(`sub:${chatId}`))) {
+    await env.BOT_STATE.put(`sub:${chatId}`, '1');
+  }
+}
+
+// Used for button presses: re-adds users who started the bot before subscribers were tracked,
+// but respects users who explicitly sent /stop.
+async function ensureSubscribed(env, chatId) {
+  if (await env.BOT_STATE.get(`sub:${chatId}`)) return;
+  if (await env.BOT_STATE.get(`optout:${chatId}`)) return;
+  await env.BOT_STATE.put(`sub:${chatId}`, '1');
+}
+
+async function removeSubscriber(env, chatId) {
+  await env.BOT_STATE.delete(`sub:${chatId}`);
+}
+
+// Sends the job's text to the next batch of subscribers and saves progress.
+async function processBroadcastBatch(env) {
+  const raw = await env.BOT_STATE.get('broadcast:job');
+  if (!raw) return;
+  const job = JSON.parse(raw);
+
+  const page = await env.BOT_STATE.list({
+    prefix: 'sub:',
+    limit: BATCH_SIZE,
+    ...(job.cursor ? { cursor: job.cursor } : {}),
+  });
+  const ids = page.keys.map((k) => k.name.slice(4));
+
+  for (let i = 0; i < ids.length; i += SENDS_PER_SECOND) {
+    const chunk = ids.slice(i, i + SENDS_PER_SECOND);
+    await Promise.all(
+      chunk.map(async (id) => {
+        const res = await sendMessage(env, id, job.text);
+        // 403 = user blocked the bot, 400 = chat no longer exists -> stop sending to them
+        if (res.status === 403 || res.status === 400) await removeSubscriber(env, id);
+      }),
+    );
+    if (i + SENDS_PER_SECOND < ids.length) await sleep(1000);
+  }
+
+  if (page.list_complete) {
+    await env.BOT_STATE.delete('broadcast:job');
+  } else {
+    await env.BOT_STATE.put('broadcast:job', JSON.stringify({ text: job.text, cursor: page.cursor }), {
+      expirationTtl: 3600,
+    });
+  }
+}
+
+async function startBroadcast(env) {
+  const text = await fetchPricesMessage(env);
+  await env.BOT_STATE.put('broadcast:job', JSON.stringify({ text, cursor: null }), { expirationTtl: 3600 });
+  await processBroadcastBatch(env);
+}
+
 async function handleCallbackQuery(env, cq) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
+  await ensureSubscribed(env, chatId);
 
   if (cq.data === 'custom_bot') {
     await env.BOT_STATE.put(`awaiting:${chatId}`, '1', { expirationTtl: 86400 }); // expires after 1 day if unused
@@ -133,8 +206,17 @@ async function handleCallbackQuery(env, cq) {
 async function handleMessage(env, msg) {
   const chatId = msg.chat.id;
 
+  if (msg.text === '/stop') {
+    await env.BOT_STATE.delete(`awaiting:${chatId}`);
+    await removeSubscriber(env, chatId);
+    await env.BOT_STATE.put(`optout:${chatId}`, '1');
+    await sendMessage(env, chatId, '🔕 ارسال خودکار قیمت برای شما متوقف شد. برای فعال‌سازی دوباره /start را بزنید.');
+    return;
+  }
+
   if (msg.text === '/start') {
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
+    await addSubscriber(env, chatId);
     await sendMessage(
       env, chatId,
       `👋 سلام ${msg.from.first_name || ''}!\nبه بات قیمت دلار و طلا خوش اومدید.\n\n` +
@@ -187,9 +269,12 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
-        const text = await fetchPricesMessage(env);
-        await sendMessage(env, env.ADMIN_CHAT_ID, text);
-      })(),
+        if (event.cron === CONTINUE_CRON) {
+          await processBroadcastBatch(env); // keep sending a broadcast that is already in progress
+        } else {
+          await startBroadcast(env); // main cron: fetch the price once, send to all subscribers
+        }
+      })().catch((e) => console.log('Scheduled error: ' + e.message)),
     );
   },
 };

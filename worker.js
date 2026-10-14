@@ -260,6 +260,63 @@ async function handleMessage(env, msg) {
   const chatId = msg.chat.id;
   const command = (msg.text || '').trim().split(/\s+/)[0].split('@')[0];
 
+  // In groups, answer only exact requests such as "10 دلار" or "10 گرم".
+  if (
+    (msg.chat.type === 'group' || msg.chat.type === 'supergroup') &&
+    typeof msg.text === 'string'
+  ) {
+    const normalizedText = msg.text
+      .replace(/[۰-۹]/g, (d) => String('۰۱۲۳۴۵۶۷۸۹'.indexOf(d)))
+      .replace(/[٠-٩]/g, (d) => String('٠١٢٣٤٥٦٧٨٩'.indexOf(d)))
+      .trim();
+    const priceMatch = normalizedText.match(/^(\d+)\s*(دلار|گرم)$/);
+
+    if (priceMatch) {
+      const amount = Number(priceMatch[1]);
+      const unit = priceMatch[2];
+
+      if (Number.isSafeInteger(amount) && amount > 0 && amount <= 100000000) {
+        try {
+          const res = await fetch(
+            `https://api.navasan.tech/latest/?api_key=${env.NAVASAN_API_KEY}`
+          );
+          if (!res.ok) throw new Error(`navasan.tech responded ${res.status}`);
+
+          const data = await res.json();
+          const isDollar = unit === 'دلار';
+          const rateItem = isDollar
+            ? (data.usd_sell || data.usd || {})
+            : (data['18ayar'] || {});
+          const rate = Number(rateItem.value);
+
+          if (!Number.isFinite(rate) || rate <= 0) {
+            throw new Error('Price rate is missing or invalid');
+          }
+
+          const total = amount * rate;
+          const reply = isDollar
+            ? `💵 قیمت ${fmtNumber(amount)} دلار\n📊 نرخ هر دلار: ${fmtNumber(rate)} تومان\n💰 مبلغ کل: ${fmtNumber(total)} تومان`
+            : `🥇 قیمت ${fmtNumber(amount)} گرم طلای ۱۸ عیار\n📊 نرخ هر گرم: ${fmtNumber(rate)} تومان\n💰 مبلغ کل: ${fmtNumber(total)} تومان`;
+
+          await tg(env, 'sendMessage', {
+            chat_id: chatId,
+            text: reply,
+            reply_to_message_id: msg.message_id,
+            allow_sending_without_reply: true,
+          });
+        } catch (e) {
+          console.log('Group price calculation failed: ' + e.message);
+          await sendMessage(
+            env,
+            chatId,
+            '❌ دریافت نرخ یا محاسبه قیمت موقتاً با مشکل روبه‌رو شد. لطفاً کمی بعد دوباره امتحان کنید.'
+          );
+        }
+      }
+      return;
+    }
+  }
+
   if (command === '/stop') {
     await env.BOT_STATE.put(`stopped:${chatId}`, '1');
     await env.BOT_STATE.delete(`awaiting:${chatId}`);

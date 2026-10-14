@@ -89,7 +89,6 @@ function mainMenuKeyboard() {
     ],
   };
 }
-
 const AI_MODEL = '@cf/meta/llama-3.1-8b-instruct';
 
 const AI_SYSTEM_PROMPT =
@@ -165,7 +164,7 @@ const answerCallback = (env, callbackQueryId, text) =>
 async function handleCallbackQuery(env, cq) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
-
+  
   if (cq.data === 'custom_bot') {
     await env.BOT_STATE.put(
       `awaiting:${chatId}`,
@@ -232,3 +231,141 @@ async function handleCallbackQuery(env, cq) {
 
 async function handleMessage(env, msg) {
   const chatId = msg.chat.id;
+  if (msg.text === '/start' || msg.text === START_BUTTON_TEXT) {
+    await env.BOT_STATE.delete(`awaiting:${chatId}`);
+
+    const subscriberKey = `subscriber:${chatId}`;
+    const isNew = !(await env.BOT_STATE.get(subscriberKey));
+
+    if (isNew) {
+      await env.BOT_STATE.put(subscriberKey, '1');
+    }
+
+    // Notify the admin every time a user starts the bot.
+    if (String(chatId) !== String(env.ADMIN_CHAT_ID)) {
+      const fullName =
+        [msg.from.first_name, msg.from.last_name]
+          .filter(Boolean)
+          .join(' ') || 'ندارد';
+
+      const startLabel = isNew
+        ? '🆕 کاربر جدید /start زد'
+        : '🔄 کاربر دوباره /start زد';
+
+      await sendMessage(
+        env,
+        env.ADMIN_CHAT_ID,
+        startLabel + '\n' +
+          '🆔 آیدی: ' + chatId + '\n' +
+          '👤 نام: ' + fullName + '\n' +
+          '🔗 یوزرنیم: ' +
+          (msg.from.username ? '@' + msg.from.username : 'ندارد')
+      );
+    }
+
+    await sendMessage(
+      env,
+      chatId,
+      `👋 سلام ${msg.from.first_name || ''}!\nبه بات قیمت دلار و طلا خوش اومدید.\n\n` +
+        `🆔 آیدی عددی شما: ${chatId}\n\n` +
+        'هر چند ساعت قیمت روز رو خودکار دریافت می‌کنید. از منوی زیر هم می‌تونید استفاده کنید:',
+      mainMenuKeyboard()
+    );
+
+    // Remove any old reply keyboard.
+    try {
+      const cleared = await tg(env, 'sendMessage', {
+        chat_id: chatId,
+        text: '✅',
+        reply_markup: removeReplyKeyboard(),
+      });
+
+      const body = await cleared.json();
+
+      if (body && body.ok) {
+        await tg(env, 'deleteMessage', {
+          chat_id: chatId,
+          message_id: body.result.message_id,
+        });
+      }
+    } catch (e) {
+      // Cosmetic only; ignore failures.
+    }
+
+    return;
+  }
+   const awaiting = await env.BOT_STATE.get(`awaiting:${chatId}`);
+
+  if (awaiting === 'description') {
+    await env.BOT_STATE.delete(`awaiting:${chatId}`);
+
+    const adminText =
+      `📩 درخواست ساخت بات شخصی\n` +
+      `🆔 آیدی: ${chatId}\n` +
+      `👤 یوزرنیم: @${msg.from.username || 'ندارد'}\n\n` +
+      `متن پیام:\n${msg.text || '(بدون متن)'}`;
+
+    await sendMessage(env, env.ADMIN_CHAT_ID, adminText);
+    await sendMessage(
+      env,
+      chatId,
+      '✅ پیام شما ارسال شد. به‌زودی باهاتون هماهنگ می‌کنیم.'
+    );
+
+    return;
+  }
+
+  if (awaiting === 'ai_chat') {
+    if (!msg.text) {
+      await sendMessage(
+        env,
+        chatId,
+        'فعلاً فقط پیام متنی رو می‌فهمم 🙂'
+      );
+      return;
+    }
+
+    const reply = await askAI(env, msg.text);
+    await sendMessage(env, chatId, reply, backKeyboard());
+    return;
+  }
+
+  // Unknown messages are ignored.
+}
+
+export default {
+  async fetch(request, env) {
+    if (request.method !== 'POST') {
+      return new Response('OK');
+    }
+
+    let update;
+
+    try {
+      update = await request.json();
+    } catch (e) {
+      return new Response('OK');
+    }
+
+    try {
+      if (update.callback_query) {
+        await handleCallbackQuery(env, update.callback_query);
+      } else if (update.message) {
+        await handleMessage(env, update.message);
+      }
+    } catch (e) {
+      console.log('Error handling update: ' + e.message);
+    }
+
+    return new Response('OK');
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(
+      (async () => {
+        const text = await fetchPricesMessage(env);
+        await sendMessage(env, env.ADMIN_CHAT_ID, text);
+      })()
+    );
+  },
+};

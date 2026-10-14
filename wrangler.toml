@@ -1,0 +1,10 @@
+name = "exchangebot"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+[[kv_namespaces]]
+binding = "BOT_STATE"
+id = "e71e4e71bf50425c96797a6d93628c1d"
+
+[triggers]
+crons = ["0 */4 * * *"]

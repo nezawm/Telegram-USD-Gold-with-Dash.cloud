@@ -1,95 +1,132 @@
-# Telegram USD & Gold Price Bot (Cloudflare Workers, free forever)
+# Telegram USD & Gold Price Bot — Cloudflare Workers
 
-A single free Cloudflare Worker that does two things:
+A Telegram bot built with a Cloudflare Worker. It fetches USD and 18-karat gold prices from Navasan and can send scheduled price updates, calculate custom amounts, and forward custom-bot requests to the administrator.
 
-1. **Pushes the USD / 18k gold price automatically every few hours** (via a Cron Trigger) to your own Telegram chat.
-2. **Responds instantly to menu buttons** — `/start` shows an inline ("glass") menu with two buttons:
-   - 🤖 **ساخت بات شخصی – ۲۹۹,۰۰۰ تومان** — asks the user to describe what they want, then forwards that description plus their Telegram ID to your own chat (the admin), so only you see it.
-   - 💱 **آخرین تغییرات دلار و طلا** — sends the latest price on demand.
+## Features
 
-Unlike a plain cron script, this version can react to button presses immediately, because Cloudflare Workers don't sleep and respond to Telegram's webhook the moment a user interacts with the bot. The whole thing fits comfortably inside Cloudflare's free tier (100,000 requests/day, 5 free cron triggers) with no credit card, no trial period, and no server to maintain.
+- **Current prices:** get the latest USD and 18k gold prices using `/price` or the menu.
+- **Custom amount calculator:** send a message in one of these formats:
+  - `10 دلار` — calculates the total price of 10 US dollars in toman.
+  - `3 گرم` — calculates the total price of 3 grams of 18-karat gold in toman.
+  - Persian numerals are supported too, for example `۱۰ دلار` and `۳ گرم`.
+- **Scheduled updates:** a Cron Trigger can send prices every four hours to users who have started the bot. Users can stop or resume scheduled messages with `/stop` and `/start`.
+- **Telegram command menu:** `/start`, `/stop`, and `/price`.
+- **Custom-bot requests:** the menu lets a user describe a bot they want; the request is forwarded to the administrator's Telegram chat.
+- **Persian formatting:** price messages include Persian numerals and Tehran date/time.
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `/start` | Starts or resumes the bot and displays the main menu. |
+| `/price` | Fetches and sends the latest USD and 18k gold prices. |
+| `/stop` | Stops scheduled price messages for that chat. |
+
+To calculate a custom amount, send only the amount and unit, for example `10 دلار` or `3 گرم`.
 
 ## How it works
 
-- `worker.js` exports two handlers:
-  - `fetch()` — receives Telegram webhook updates (messages and button presses) and reacts immediately.
-  - `scheduled()` — runs on the Cron Trigger you configure, and sends the price automatically.
-- A Cloudflare **KV namespace** (`BOT_STATE`) remembers, per chat, whether a user is in the middle of typing a description for the custom-bot request. This is the only "state" the bot needs.
-- Secrets (bot token, admin chat ID, API key) are stored as **Worker secrets** — encrypted, never visible in the code or in logs.
+- `worker.js` exports two entry points:
+  - `fetch()` handles Telegram webhook updates, commands, button presses, and custom amount messages.
+  - `scheduled()` sends scheduled price updates when the Cron Trigger runs.
+- The Worker requests current prices from the Navasan API. It uses `usd_sell` (or `usd` as a fallback) for USD and `18ayar` for 18-karat gold.
+- The `BOT_STATE` KV namespace stores subscriber status and short-lived conversation state.
+- Telegram bot token, Navasan API key, and administrator chat ID are configured in Cloudflare settings, not hard-coded in this repository.
 
 ## Setup
 
-### 1. Get your credentials
+### 1. Create a Telegram bot and collect credentials
 
-- **Telegram bot token**: message `@BotFather`, run `/newbot`, copy the token.
-- **Your chat ID** (this becomes `ADMIN_CHAT_ID`, the only place custom-bot requests are shown): message `@userinfobot` and copy the numeric `Id`. Then open a chat with your own bot and press *Start* once.
-- **navasan.tech API key**: sign up at navasan.tech and copy your key.
+1. Open [@BotFather](https://t.me/BotFather), run `/newbot`, and copy the bot token.
+2. Find your numeric Telegram chat ID using a trusted chat-ID bot or your existing setup. This becomes `ADMIN_CHAT_ID`.
+3. Obtain an API key from [Navasan](https://navasan.tech/).
 
-### 2. Create the Worker
+### 2. Create and deploy the Cloudflare Worker
 
-1. Go to the [Cloudflare dashboard](https://dash.cloudflare.com) → sign up free if you don't have an account.
-2. **Workers & Pages → Create → Create Worker**. Give it any name (e.g. `telegram-price-bot`) and deploy the default "Hello World" code first.
-3. Click **Edit code**, delete everything, and paste in the contents of `worker.js` from this folder. Click **Deploy**.
+1. Open the [Cloudflare dashboard](https://dash.cloudflare.com/).
+2. Go to **Workers & Pages** and create a Worker.
+3. Paste the contents of `worker.js` into the editor and deploy it.
+4. Keep the Worker URL handy; it will be used as the Telegram webhook URL.
 
-### 3. Add the secrets
+### 3. Configure secrets
 
-In the Worker's **Settings → Variables and Secrets**, add three **secret** variables (not plain text):
+In **Worker → Settings → Variables and Secrets**, configure these values securely:
 
-| Name | Value |
-|---|---|
-| `TELEGRAM_BOT_TOKEN` | the token from BotFather |
-| `ADMIN_CHAT_ID` | your numeric chat ID |
-| `NAVASAN_API_KEY` | your navasan.tech API key |
+| Variable | Purpose |
+| --- | --- |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot token from BotFather |
+| `NAVASAN_API_KEY` | Navasan API key |
+| `ADMIN_CHAT_ID` | Numeric Telegram chat ID for administrator notifications and custom-bot requests |
 
-### 4. Create the KV namespace
+Never commit real tokens or API keys to GitHub.
 
-1. In the Cloudflare dashboard, go to **Storage & Databases → KV → Create namespace**. Name it anything, e.g. `bot-state`.
-2. Back in your Worker's **Settings → Bindings → Add binding → KV Namespace**. Set the **variable name** to exactly `BOT_STATE` and select the namespace you just created.
+### 4. Bind the KV namespace
 
-### 5. Add the Cron Trigger
+1. In Cloudflare, create a KV namespace.
+2. Open the Worker settings and add a **KV Namespace** binding.
+3. Set the variable name to exactly `BOT_STATE` and select the namespace.
 
-In the Worker's **Settings → Triggers → Cron Triggers → Add Cron Trigger**, enter a schedule such as:
+### 5. Configure the scheduled trigger
 
-```
+In **Worker → Settings → Triggers → Cron Triggers**, add:
+
+```text
 0 */4 * * *
 ```
 
-This runs every 4 hours (00:00, 04:00, 08:00, 12:00, 16:00, 20:00 UTC). Change `4` to however many hours you want between messages.
+This schedule runs every four hours in UTC. Cloudflare Cron schedules use UTC, so the local time in your region may differ.
 
-### 6. Point Telegram at your Worker (webhook)
+### 6. Configure Telegram's webhook
 
-Your Worker has a public URL like `https://telegram-price-bot.<your-subdomain>.workers.dev`. Visit this URL once in your browser (replace both placeholders) to register it with Telegram:
+Use your actual Worker URL and bot token in the Telegram Bot API request below:
 
+```text
+https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=<YOUR_WORKER_URL>
 ```
-https://api.telegram.org/bot<YOUR_BOT_TOKEN>/setWebhook?url=https://telegram-price-bot.<your-subdomain>.workers.dev
-```
 
-You should see `{"ok":true,"result":true,...}`. That's it — no further action needed.
+Replace both placeholders with your real values. Do not publish a URL containing your real bot token.
 
-### 7. Test it
+### 7. Test the bot
 
-- Send `/start` to your bot in Telegram. You should get the welcome message with your chat ID and the two-button menu.
-- Press **💱 آخرین تغییرات دلار و طلا** — you should get the current price immediately.
-- Press **🤖 ساخت بات شخصی...** — the message should change to ask what you want the bot for. Reply with any text, and you (as `ADMIN_CHAT_ID`) should receive that text along with the sender's Telegram ID and username.
+In a private chat with the bot, send:
+
+1. `/start` — confirm the welcome message and menu appear.
+2. `/price` — confirm current USD and 18k gold prices are returned.
+3. `10 دلار` — confirm the bot returns the USD unit rate and total.
+4. `3 گرم` — confirm the bot returns the 18k gold unit rate and total.
+5. `/stop` — confirm scheduled updates are disabled for that chat; send `/start` to resume.
+
+## Using the bot in Telegram groups
+
+The custom calculator can reply to messages such as `10 دلار` and `3 گرم` in groups, provided Telegram delivers those messages to the bot.
+
+1. Open [@BotFather](https://t.me/BotFather) and run `/setprivacy`.
+2. Select your bot and choose **Disable**.
+3. Remove the bot from the group and add it again so the updated privacy setting takes effect.
+4. Test with `10 دلار` and `3 گرم`.
+
+Only messages matching the supported amount formats are handled by the custom calculator; ordinary unrecognized messages are ignored. Group administrators should consider whether the bot needs access to all group messages before disabling privacy mode.
 
 ## Customization
 
-- **Change the frequency**: edit the Cron Trigger schedule in the dashboard (Settings → Triggers).
-- **Change the menu text or buttons**: edit `mainMenuKeyboard()` in `worker.js`.
-- **Add more buttons**: add entries to `mainMenuKeyboard()` and a matching `if (cq.data === '...')` branch in `handleCallbackQuery()`.
-- **Switch data provider**: edit the URL in `fetchPricesMessage()` and adjust the `usd_sell` / `18ayar` field names if needed.
+- **Update frequency:** change the Cron Trigger in Cloudflare.
+- **Menu buttons:** edit `mainMenuKeyboard()` in `worker.js`.
+- **Price source or fields:** edit `fetchPricesMessage()` and the Navasan response fields used by the custom calculator.
+- **Custom calculation formats:** edit the amount matching logic in `handleMessage()`.
 
-## Notes
+## Troubleshooting and security
 
-- If the bot token is ever exposed (e.g. pasted somewhere public), revoke it with `/revoke` in `@BotFather` and update the `TELEGRAM_BOT_TOKEN` secret — the webhook keeps working once you update the secret, no need to re-register it.
-- The KV entry for an unanswered "custom bot" request expires automatically after 1 day, so a user can't accidentally trigger a forward days later by sending an unrelated message.
-- Free-tier limits (100,000 requests/day, 5 cron triggers/account) are far above what a personal bot like this needs.
+- If the bot does not respond, check the Worker logs, webhook status, required secrets, and the `BOT_STATE` binding.
+- If it does not see ordinary group messages, check BotFather's `/setprivacy` setting and re-add the bot to the group.
+- If price fetching fails, verify the Navasan API key and check whether the API is responding.
+- If a bot token is exposed, revoke it with BotFather and update the `TELEGRAM_BOT_TOKEN` secret in Cloudflare.
+- The scheduled broadcast sends messages to users who have started the bot, except chats that have opted out using `/stop`. Telegram users generally need to start a bot before it can message them privately.
 
 ## Project structure
 
-```
+```text
 .
 └── worker.js
 ```
 
-No build step, no dependencies, no `package.json` needed — this single file is pasted directly into the Cloudflare dashboard editor.
+This project uses a single Worker source file and does not require a separate build step or `package.json`.

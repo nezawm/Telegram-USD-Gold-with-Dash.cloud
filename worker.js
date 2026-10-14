@@ -67,7 +67,10 @@ async function fetchPricesMessage(env) {
     `🥇 طلای ۱۸ عیار: ${fmtNumber(goldItem.value)} تومان\n` +
     `🕐 آخرین تغییر: ${fmtLastChange(goldItem.date)}\n\n` +
     `📅 تاریخ دریافت: ${dateStr}\n` +
-    `⏰ ساعت دریافت: ${timeStr}`
+    `⏰ ساعت دریافت: ${timeStr}\n\n` +
+    `💡 محاسبه قیمت دلخواه:\n` +
+    `برای قیمت دلار، عدد + دلار بفرستید؛ مثل 10 دلار\n` +
+    `برای قیمت طلای ۱۸ عیار، عدد + گرم بفرستید؛ مثل 3 گرم`
   );
 }
 

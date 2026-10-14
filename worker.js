@@ -161,6 +161,33 @@ const answerCallback = (env, callbackQueryId, text) =>
     ...(text ? { text } : {}),
   });
 
+// Register the commands shown in Telegram's chat menu.
+// BOT_STATE prevents repeating the registration on every update.
+async function registerBotCommands(env) {
+  const registered = await env.BOT_STATE.get('telegram_commands_registered');
+  if (registered === '1') return;
+
+  const response = await tg(env, 'setMyCommands', {
+    commands: [
+      { command: 'start', description: 'شروع و نمایش منوی اصلی' },
+      { command: 'stop', description: 'توقف دریافت قیمت‌های دوره‌ای' },
+      { command: 'price', description: 'دریافت آخرین قیمت دلار و طلا' },
+    ],
+  });
+
+  try {
+    const result = await response.clone().json();
+    if (response.ok && result && result.ok) {
+      await env.BOT_STATE.put('telegram_commands_registered', '1');
+      console.log('Telegram bot commands registered.');
+    } else {
+      console.log('Could not register Telegram bot commands:', JSON.stringify(result));
+    }
+  } catch (e) {
+    console.log('Could not read setMyCommands response:', e.message);
+  }
+}
+
 async function handleCallbackQuery(env, cq) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
@@ -231,8 +258,32 @@ async function handleCallbackQuery(env, cq) {
 
 async function handleMessage(env, msg) {
   const chatId = msg.chat.id;
-  if (msg.text === '/start' || msg.text === START_BUTTON_TEXT) {
+  const command = (msg.text || '').trim().split(/\s+/)[0].split('@')[0];
+
+  if (command === '/stop') {
+    await env.BOT_STATE.put(`stopped:${chatId}`, '1');
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
+    await sendMessage(
+      env,
+      chatId,
+      '🔕 دریافت خودکار قیمت‌ها برای شما متوقف شد. هر زمان خواستید با /start دوباره فعالش کنید.'
+    );
+    return;
+  }
+
+  if (command === '/price') {
+    try {
+      await sendMessage(env, chatId, await fetchPricesMessage(env));
+    } catch (e) {
+      console.log('Could not fetch prices for /price: ' + e.message);
+      await sendMessage(env, chatId, '❌ دریافت قیمت‌ها موقتاً با مشکل روبه‌رو شد. لطفاً کمی بعد دوباره امتحان کنید.');
+    }
+    return;
+  }
+
+  if (command === '/start' || msg.text === START_BUTTON_TEXT) {
+    await env.BOT_STATE.delete(`awaiting:${chatId}`);
+    await env.BOT_STATE.delete(`stopped:${chatId}`);
 
     const subscriberKey = `subscriber:${chatId}`;
     const isNew = !(await env.BOT_STATE.get(subscriberKey));
@@ -348,6 +399,7 @@ export default {
     }
 
     try {
+      await registerBotCommands(env);
       if (update.callback_query) {
         await handleCallbackQuery(env, update.callback_query);
       } else if (update.message) {
@@ -364,7 +416,36 @@ export default {
     ctx.waitUntil(
       (async () => {
         const text = await fetchPricesMessage(env);
+
+        // Preserve the existing admin price update.
         await sendMessage(env, env.ADMIN_CHAT_ID, text);
+
+        // Send scheduled prices to all users who started the bot,
+        // except those who opted out with /stop.
+        let cursor;
+        do {
+          const page = await env.BOT_STATE.list({
+            prefix: 'subscriber:',
+            cursor,
+            limit: 1000,
+          });
+
+          for (const item of page.keys) {
+            const chatId = item.name.slice('subscriber:'.length);
+            if (!chatId || String(chatId) === String(env.ADMIN_CHAT_ID)) continue;
+
+            const stopped = await env.BOT_STATE.get(`stopped:${chatId}`);
+            if (stopped === '1') continue;
+
+            try {
+              await sendMessage(env, chatId, text);
+            } catch (e) {
+              console.log('Scheduled price send failed for ' + chatId + ': ' + e.message);
+            }
+          }
+
+          cursor = page.list_complete ? undefined : page.cursor;
+        } while (cursor);
       })()
     );
   },

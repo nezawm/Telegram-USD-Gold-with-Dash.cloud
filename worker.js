@@ -175,7 +175,35 @@ async function handleMessage(env, msg) {
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
 
   const subscriberKey = `subscriber:${chatId}`;
-  const isNew = !(await env.BOT_STATE.get(subscriberKey));
+  const isNew = !(await env.BOT_STATE.get(sub
+const subscriberKey = `subscriber:${chatId}`;
+const isNew = !(await env.BOT_STATE.get(subscriberKey));
+
+if (isNew) {
+  await env.BOT_STATE.put(subscriberKey, '1');
+}
+
+if (String(chatId) !== String(env.ADMIN_CHAT_ID)) {
+  const fullName =
+    [msg.from.first_name, msg.from.last_name]
+      .filter(Boolean)
+      .join(' ') || 'ندارد';
+
+  const startLabel = isNew
+    ? '🆕 کاربر جدید /start زد'
+    : '🔄 کاربر دوباره /start زد';
+
+  await sendMessage(
+    env,
+    env.ADMIN_CHAT_ID,
+    startLabel + '\n' +
+      '🆔 آیدی: ' + chatId + '\n' +
+      '👤 نام: ' + fullName + '\n' +
+      '🔗 یوزرنیم: ' +
+      (msg.from.username ? '@' + msg.from.username : 'ندارد')
+  );
+}
+scriberKey));
 
   if (isNew) {
     await env.BOT_STATE.put(subscriberKey, '1');

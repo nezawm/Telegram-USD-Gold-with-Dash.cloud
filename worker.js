@@ -173,6 +173,31 @@ async function handleMessage(env, msg) {
 
   if (msg.text === '/start' || msg.text === START_BUTTON_TEXT) {
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
+
+  const subscriberKey = `subscriber:${chatId}`;
+  const isNew = !(await env.BOT_STATE.get(subscriberKey));
+
+  if (isNew) {
+    await env.BOT_STATE.put(subscriberKey, '1');
+
+    if (String(chatId) !== String(env.ADMIN_CHAT_ID)) {
+      const fullName =
+        [msg.from.first_name, msg.from.last_name]
+          .filter(Boolean)
+          .join(' ') || 'ندارد';
+
+      await sendMessage(
+        env,
+        env.ADMIN_CHAT_ID,
+        '🆕 کاربر جدید /start زد\n' +
+          '🆔 آیدی: ' + chatId + '\n' +
+          '👤 نام: ' + fullName + '\n' +
+          '🔗 یوزرنیم: ' +
+          (msg.from.username ? '@' + msg.from.username : 'ندارد')
+      );
+    }
+  }
+
     // Welcome + the glass menu in one message.
     await sendMessage(
       env, chatId,

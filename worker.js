@@ -7,11 +7,12 @@
 // Required secrets (Settings -> Variables and Secrets):
 //   TELEGRAM_BOT_TOKEN  - from @BotFather
 //   NAVASAN_API_KEY     - from navasan.tech
-//   ADMIN_CHAT_ID       - your own numeric Telegram chat ID (the only person who sees custom-bot requests;
-//                         the scheduled price is sent to ALL users who pressed /start, not just the admin)
+//   ADMIN_CHAT_ID       - your own numeric Telegram chat ID (the only person who sees custom-bot requests)
 //
-// Required binding (Settings -> Bindings -> KV Namespace):
-//   BOT_STATE           - any KV namespace, used to remember "this user is typing a description"
+// Required bindings (Settings -> Bindings):
+//   BOT_STATE           - any KV namespace, used to remember what a chat is currently doing
+//                          ("typing a custom-bot description" or "chatting with the AI")
+//   AI                  - Cloudflare Workers AI binding (built-in, free, no API key needed)
 
 const PERSIAN_DIGITS = '۰۱۲۳۴۵۶۷۸۹';
 
@@ -64,8 +65,33 @@ function mainMenuKeyboard() {
     inline_keyboard: [
       [{ text: '🤖 ساخت بات شخصی – ۲۹۹,۰۰۰ تومان', callback_data: 'custom_bot' }],
       [{ text: '💱 آخرین تغییرات دلار و طلا', callback_data: 'final_prices' }],
+      // AI chat button is switched off for now. To bring it back, add this row and add the Workers AI binding named AI:
+      // [{ text: '🧠 گفتگو با هوش مصنوعی', callback_data: 'ai_chat' }],
     ],
   };
+}
+
+const AI_MODEL = '@cf/meta/llama-3.1-8b-instruct';
+const AI_SYSTEM_PROMPT =
+  'You are a helpful, concise assistant inside a Telegram bot. Always reply in Persian (Farsi) unless the user writes in another language.';
+
+async function askAI(env, userText) {
+  const result = await env.AI.run(AI_MODEL, {
+    messages: [
+      { role: 'system', content: AI_SYSTEM_PROMPT },
+      { role: 'user', content: userText },
+    ],
+  });
+  return (result && result.response) ? result.response.trim() : 'متاسفانه نتونستم جواب بدم، دوباره امتحان کن.';
+}
+
+// First-time users get Telegram's own built-in START button (shown only on a brand-new chat), so no custom
+// start button is needed. An earlier version pinned a custom "▶️ شروع" reply keyboard; this text is still
+// accepted as /start, and the welcome message removes that old keyboard so it doesn't stay on screen.
+const START_BUTTON_TEXT = '▶️ شروع';
+
+function removeReplyKeyboard() {
+  return { remove_keyboard: true };
 }
 
 function backKeyboard() {
@@ -98,84 +124,12 @@ const editMessage = (env, chatId, messageId, text, replyMarkup) =>
 const answerCallback = (env, callbackQueryId, text) =>
   tg(env, 'answerCallbackQuery', { callback_query_id: callbackQueryId, ...(text ? { text } : {}) });
 
-// ---------------------------------------------------------------------------
-// Subscribers + broadcast
-// ---------------------------------------------------------------------------
-// Every user who presses /start (or any menu button) is stored in KV as `sub:<chatId>`.
-// The scheduled push is sent to ALL of them, in small batches, because Cloudflare's free
-// plan allows only ~50 outgoing requests per invocation.
-const BATCH_SIZE = 35;            // sends per invocation (keeps us under the 50-subrequest limit)
-const SENDS_PER_SECOND = 20;      // Telegram allows ~30 msg/sec globally; stay below it
-const CONTINUE_CRON = '* * * * *'; // optional 2nd cron: continues a broadcast that didn't fit in one batch
-
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-async function addSubscriber(env, chatId) {
-  await env.BOT_STATE.delete(`optout:${chatId}`);
-  if (!(await env.BOT_STATE.get(`sub:${chatId}`))) {
-    await env.BOT_STATE.put(`sub:${chatId}`, '1');
-  }
-}
-
-// Used for button presses: re-adds users who started the bot before subscribers were tracked,
-// but respects users who explicitly sent /stop.
-async function ensureSubscribed(env, chatId) {
-  if (await env.BOT_STATE.get(`sub:${chatId}`)) return;
-  if (await env.BOT_STATE.get(`optout:${chatId}`)) return;
-  await env.BOT_STATE.put(`sub:${chatId}`, '1');
-}
-
-async function removeSubscriber(env, chatId) {
-  await env.BOT_STATE.delete(`sub:${chatId}`);
-}
-
-// Sends the job's text to the next batch of subscribers and saves progress.
-async function processBroadcastBatch(env) {
-  const raw = await env.BOT_STATE.get('broadcast:job');
-  if (!raw) return;
-  const job = JSON.parse(raw);
-
-  const page = await env.BOT_STATE.list({
-    prefix: 'sub:',
-    limit: BATCH_SIZE,
-    ...(job.cursor ? { cursor: job.cursor } : {}),
-  });
-  const ids = page.keys.map((k) => k.name.slice(4));
-
-  for (let i = 0; i < ids.length; i += SENDS_PER_SECOND) {
-    const chunk = ids.slice(i, i + SENDS_PER_SECOND);
-    await Promise.all(
-      chunk.map(async (id) => {
-        const res = await sendMessage(env, id, job.text);
-        // 403 = user blocked the bot, 400 = chat no longer exists -> stop sending to them
-        if (res.status === 403 || res.status === 400) await removeSubscriber(env, id);
-      }),
-    );
-    if (i + SENDS_PER_SECOND < ids.length) await sleep(1000);
-  }
-
-  if (page.list_complete) {
-    await env.BOT_STATE.delete('broadcast:job');
-  } else {
-    await env.BOT_STATE.put('broadcast:job', JSON.stringify({ text: job.text, cursor: page.cursor }), {
-      expirationTtl: 3600,
-    });
-  }
-}
-
-async function startBroadcast(env) {
-  const text = await fetchPricesMessage(env);
-  await env.BOT_STATE.put('broadcast:job', JSON.stringify({ text, cursor: null }), { expirationTtl: 3600 });
-  await processBroadcastBatch(env);
-}
-
 async function handleCallbackQuery(env, cq) {
   const chatId = cq.message.chat.id;
   const messageId = cq.message.message_id;
-  await ensureSubscribed(env, chatId);
 
   if (cq.data === 'custom_bot') {
-    await env.BOT_STATE.put(`awaiting:${chatId}`, '1', { expirationTtl: 86400 }); // expires after 1 day if unused
+    await env.BOT_STATE.put(`awaiting:${chatId}`, 'description', { expirationTtl: 86400 }); // expires after 1 day if unused
     await editMessage(
       env, chatId, messageId,
       '✍️ لطفاً در یک پیام بنویسید این بات رو برای چه کاری می‌خواید (نوع کسب‌وکار، امکانات موردنظر و ...).\n\n' +
@@ -193,6 +147,17 @@ async function handleCallbackQuery(env, cq) {
     return;
   }
 
+  if (cq.data === 'ai_chat') {
+    await env.BOT_STATE.put(`awaiting:${chatId}`, 'ai_chat', { expirationTtl: 86400 });
+    await editMessage(
+      env, chatId, messageId,
+      '🧠 حالا هر سوالی داری بپرس، جواب می‌دم.\n\nبرای خروج از این حالت، دکمه‌ی بازگشت رو بزن یا /start رو بفرست.',
+      backKeyboard(),
+    );
+    await answerCallback(env, cq.id);
+    return;
+  }
+
   if (cq.data === 'back_to_menu') {
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
     await editMessage(env, chatId, messageId, `🏠 منوی اصلی\n\n🆔 آیدی عددی شما: ${chatId}`, mainMenuKeyboard());
@@ -206,17 +171,9 @@ async function handleCallbackQuery(env, cq) {
 async function handleMessage(env, msg) {
   const chatId = msg.chat.id;
 
-  if (msg.text === '/stop') {
+  if (msg.text === '/start' || msg.text === START_BUTTON_TEXT) {
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
-    await removeSubscriber(env, chatId);
-    await env.BOT_STATE.put(`optout:${chatId}`, '1');
-    await sendMessage(env, chatId, '🔕 ارسال خودکار قیمت برای شما متوقف شد. برای فعال‌سازی دوباره /start را بزنید.');
-    return;
-  }
-
-  if (msg.text === '/start') {
-    await env.BOT_STATE.delete(`awaiting:${chatId}`);
-    await addSubscriber(env, chatId);
+    // Welcome + the glass menu in one message.
     await sendMessage(
       env, chatId,
       `👋 سلام ${msg.from.first_name || ''}!\nبه بات قیمت دلار و طلا خوش اومدید.\n\n` +
@@ -224,11 +181,23 @@ async function handleMessage(env, msg) {
         'هر چند ساعت قیمت روز رو خودکار دریافت می‌کنید. از منوی زیر هم می‌تونید استفاده کنید:',
       mainMenuKeyboard(),
     );
+    // Clear any leftover pinned start button from the earlier version (a reply keyboard can only be removed
+    // by a message that carries remove_keyboard, so send a throwaway one and delete it right away).
+    try {
+      const cleared = await tg(env, 'sendMessage', { chat_id: chatId, text: '✅', reply_markup: removeReplyKeyboard() });
+      const body = await cleared.json();
+      if (body && body.ok) {
+        await tg(env, 'deleteMessage', { chat_id: chatId, message_id: body.result.message_id });
+      }
+    } catch (e) {
+      // Cosmetic only; ignore failures.
+    }
     return;
   }
 
   const awaiting = await env.BOT_STATE.get(`awaiting:${chatId}`);
-  if (awaiting) {
+
+  if (awaiting === 'description') {
     await env.BOT_STATE.delete(`awaiting:${chatId}`);
     const adminText =
       `📩 درخواست ساخت بات شخصی\n` +
@@ -237,7 +206,19 @@ async function handleMessage(env, msg) {
       `متن پیام:\n${msg.text || '(بدون متن)'}`;
     await sendMessage(env, env.ADMIN_CHAT_ID, adminText);
     await sendMessage(env, chatId, '✅ پیام شما ارسال شد. به‌زودی باهاتون هماهنگ می‌کنیم.');
+    return;
   }
+
+  if (awaiting === 'ai_chat') {
+    if (!msg.text) {
+      await sendMessage(env, chatId, 'فعلاً فقط پیام متنی رو می‌فهمم 🙂');
+      return;
+    }
+    const reply = await askAI(env, msg.text);
+    await sendMessage(env, chatId, reply, backKeyboard());
+    return;
+  }
+
   // Otherwise: not a command we recognize and not an active conversation — stay silent.
   // The bot's main job (periodic price push) keeps running regardless, via scheduled().
 }
@@ -269,12 +250,9 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(
       (async () => {
-        if (event.cron === CONTINUE_CRON) {
-          await processBroadcastBatch(env); // keep sending a broadcast that is already in progress
-        } else {
-          await startBroadcast(env); // main cron: fetch the price once, send to all subscribers
-        }
-      })().catch((e) => console.log('Scheduled error: ' + e.message)),
+        const text = await fetchPricesMessage(env);
+        await sendMessage(env, env.ADMIN_CHAT_ID, text);
+      })(),
     );
   },
 };
